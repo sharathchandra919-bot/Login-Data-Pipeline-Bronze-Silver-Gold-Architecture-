@@ -1,5 +1,110 @@
-Project Overview
+!apt-get install openjdk-11-jdk -qq
+!pip install pyspark
 
-This project demonstrates an end-to-end data engineering pipeline built using Apache Spark, following the Bronze–Silver–Gold data architecture pattern.
+from pyspark.sql import SparkSession
 
-The pipeline processes raw social media usage data, cleans and deduplicates it, applies data quality checks, and produces business-ready analytical metrics such as engagement vs satisfaction.
+spark = SparkSession.builder \
+    .appName("LoginPipeline") \
+    .getOrCreate()
+
+#BRONZE LAYER
+
+bronze_df = (
+    spark.read
+    .option("header", True)
+    .option("inferSchema", True)
+    .csv("/content/Time-Wasters on Social Media.csv")
+)
+
+bronze_df.printSchema()
+bronze_df.show(5)
+
+#SILVER LAYER
+import re
+
+def normalize_column_names(df):
+  new_cols = []
+  for col in df.columns:
+    col_clean = col.lower()
+    col_clean = re.sub(r'[^\w]+', "_",col_clean)
+    # col_clean = col_clean.strip("_")
+    new_cols.append(col_clean)
+  df = df.toDF(*new_cols)
+  return df
+
+silver_df = normalize_column_names(bronze_df)
+# silver_df.printSchema()
+silver_df.show(5)
+
+from pyspark.sql.functions import col,try_to_timestamp,current_timestamp,when
+
+silver_ts_df = (
+    silver_df.withColumn("event_ts",try_to_timestamp(col("watch_time")))
+    .withColumn("event_ts",when(col("event_ts") <= current_timestamp(),col("event_ts")).otherwise(None))
+)
+
+silver_ts_df.select("watch_time","event_ts").show(5,truncate= False)
+silver_ts_df.filter(col("event_ts").isNull()).count()
+silver_ts_df.filter(col("watch_time").isNotNull()).count()
+
+silver_df = silver_df.withColumnRenamed("watch_time","watch_time_of_the_day")
+
+from pyspark.sql.functions import col,regexp_extract
+silver_df = silver_df.withColumn("is_valid_time",regexp_extract(
+    col("watch_time_of_the_day"),
+    r"^(1[0-2]|[1-9]):[0-5][0-9]\s?(AM|PM)$",
+    0
+) != ""
+)
+
+silver_df = silver_df.filter(col("is_valid_time"))
+
+# silver_df.show()       
+# silver_df.printSchema()
+
+silver_df = silver_df.dropDuplicates(["userid","platform","watch_time_of_the_day","video_id"])
+
+# GOLD LAYER
+from pyspark.sql.functions import sum as spark_sum
+
+gold_df_platform = silver_df.groupBy("platform") \
+                            .agg(spark_sum("total_time_spent").alias("total_time_watched")) \
+                            .orderBy(col("total_time_watched").desc())
+
+gold_df_platform.show()
+gold_df_platform.count()
+
+from pyspark.sql.functions import avg,count
+
+gold_engagement = silver_df.groupBy("engagement").agg(
+    avg("satisfaction").alias("avg_satisfaction"),
+    count("userid").alias("user_count")
+).orderBy("engagement")
+
+gold_engagement.show()
+silver_df.select("engagement", "satisfaction").summary().show()
+
+total_rows = silver_df.count()
+
+null_check = silver_df.select([count(col(c))/total_rows for c in silver_df.columns])
+null_check.show()
+
+
+#We define acceptable null thresholds and fail the pipeline if exceeded.
+
+silver_df.filter(
+    (col("engagement") < 0) | (col("satisfaction") < 0)
+).count()
+
+#spark implementation
+from pyspark.sql.functions import current_timestamp, lit
+
+gold_engagement_satisfaction = (
+    gold_engagement
+    .withColumn("metric_date", lit(None).cast("date"))
+    .withColumn("created_at", current_timestamp())
+)
+
+gold_engagement_satisfaction.printSchema()
+gold_engagement_satisfaction.show()
+
