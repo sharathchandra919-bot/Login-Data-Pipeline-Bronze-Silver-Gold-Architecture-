@@ -1,0 +1,5 @@
+Project Overview
+
+This project demonstrates an end-to-end data engineering pipeline built using Apache Spark, following the Bronze–Silver–Gold data architecture pattern.
+
+The pipeline processes raw social media usage data, cleans and deduplicates it, applies data quality checks, and produces business-ready analytical metrics such as engagement vs satisfaction.
